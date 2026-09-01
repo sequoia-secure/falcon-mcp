@@ -7,6 +7,7 @@ Next-Gen SIEM via the asynchronous job-based search API.
 
 import asyncio
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -48,52 +49,83 @@ POLL_INTERVAL_SECONDS = int(os.environ.get("FALCON_MCP_NGSIEM_POLL_INTERVAL", "5
 TIMEOUT_SECONDS = int(os.environ.get("FALCON_MCP_NGSIEM_TIMEOUT", "300"))
 
 # `repository` is the only caller-supplied value in this server that reaches a URL
-# path variable (/humio/api/v1/repositories/{repository}/queryjobs). FalconPy
-# interpolates it into the route and `requests` normalizes the path before sending,
-# so a separator or a bare dot-segment retargets the request at a route the calling
-# operation never selected. A separator is what makes traversal possible, so once
-# those are rejected only a whole-value dot-segment can still alter the path —
-# `a..b` is inert and stays allowed.
-_UNSAFE_REPOSITORY_CHARS = ("/", "\\", "%")
-_DOT_SEGMENTS = (".", "..")
+# path variable (/humio/api/v1/repositories/{repository}/queryjobs, shared by
+# StartSearchV1, GetSearchStatusV1 and StopSearchV1). FalconPy interpolates it into
+# the route without percent-encoding it, and `requests` then parses and normalizes
+# the result, so any character that is reserved in a URL retargets the request at a
+# route the calling operation never selected:
+#
+#   "a/../../oauth2/token" -> POST /humio/api/v1/oauth2/token/queryjobs
+#                             (dot-segments normalize away the repositories prefix)
+#   "search-all?a=b"       -> POST /humio/api/v1/repositories/search-all
+#                             (path stops at '?'; "a=b/queryjobs" becomes the query)
+#   "search-all#"          -> POST /humio/api/v1/repositories/search-all
+#                             ('#' starts a fragment, dropping the /queryjobs suffix)
+#
+# So constrain the value to what can only ever be one literal path segment: the
+# characters repository and view names are actually built from. Every separator
+# ('/', '\'), URL delimiter ('?', '#', ';', ':', '@'), escape ('%'), whitespace and
+# control character falls outside that set, which leaves the request able to reach
+# only /humio/api/v1/repositories/<name>/... — the route the operation selected.
+#
+# Deliberately a character allow-list rather than a list of known repository names:
+# the field advertises that custom views may be passed by name and those are
+# tenant-specific, so a name allow-list would reject valid views without buying
+# anything — what makes a name safe here is its characters, not its spelling.
+#
+# Anchored with `\A`/`\Z` as well as matched with `fullmatch`, so the pattern is
+# correct on its own: `$` would accept a trailing newline, and an unanchored pattern
+# would accept any prefix if this were ever matched with `match` instead.
+_REPOSITORY_PATTERN = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9._-]*\Z")
+
+# Rejected on top of the pattern. The pattern alone already makes a dot-segment
+# unreachable (no separator can survive it), but a name containing '..' is not a real
+# repository either, and refusing it keeps the guard robust if the pattern is ever
+# widened.
+_DOT_RUN = ".."
+
+# Substituted for an unresolved Pydantic `Field` default; see `_validate_repository`.
+_DEFAULT_REPOSITORY = "search-all"
 
 
-def _validate_repository(repository: Any) -> dict[str, Any] | None:
-    """Reject a repository value that would change which route is called.
-
-    Returns an error response to hand straight back to the caller, or None when the
-    value is safe to interpolate.
+def _validate_repository(repository: Any) -> tuple[str, dict[str, Any] | None]:
+    """Resolve a repository value and reject one that would change the route called.
 
     A non-str value is an unresolved Pydantic `Field` default, which happens only when
     the tool method is called directly instead of through FastMCP — the same reason
-    `end` is guarded with `isinstance` below. FastMCP validates against the `str`
-    annotation before dispatch, and the declared default is safe, so let it through.
+    `end` is guarded with `isinstance` below. Substitute the declared default rather
+    than pass the object on: FalconPy would format its repr into the request path, and
+    that repr carries slashes from the field's own description.
 
     Args:
         repository: The caller-supplied repository or view name
 
     Returns:
-        An error response dict, or None if the value is acceptable
+        A (repository, error) pair. The repository is the value to use for the
+        request; `error` is an error response to hand straight back to the caller,
+        and is None exactly when the repository is safe to interpolate into the path.
     """
     if not isinstance(repository, str):
-        return None
+        return _DEFAULT_REPOSITORY, None
 
     if not repository.strip():
-        return _format_error_response(
+        return repository, _format_error_response(
             "Invalid repository: must be a non-empty repository or view name, "
             "for example 'search-all'.",
             operation="StartSearchV1",
         )
 
-    if any(char in repository for char in _UNSAFE_REPOSITORY_CHARS) or repository in _DOT_SEGMENTS:
-        return _format_error_response(
-            f"Invalid repository {repository!r}: must not contain '/', '\\', or '%', "
-            "or be '.' or '..'. Pass a plain repository or view name, "
-            "for example 'search-all'.",
+    if not _REPOSITORY_PATTERN.fullmatch(repository) or _DOT_RUN in repository:
+        return repository, _format_error_response(
+            f"Invalid repository {repository!r}: pass a bare repository or view name "
+            "made up of letters, digits, '.', '-' and '_', for example 'search-all'. "
+            "The name is used as a single URL path segment, so path separators ('/', "
+            "'\\'), URL delimiters such as '?' and '#', '%', whitespace and '..' are "
+            "rejected.",
             operation="StartSearchV1",
         )
 
-    return None
+    return repository, None
 
 
 def _iso_to_epoch_ms(iso_timestamp: str) -> int:
@@ -305,7 +337,9 @@ class NGSIEMModule(BaseModule):
                 "falcon_for_it_view (Falcon for IT data), "
                 "forensics_view (Falcon Forensics triage data). "
                 "Custom and other built-in repositories/views can also be passed by name. "
-                "Pass the bare name only: values containing '/', '\\', or '%' are rejected."
+                "Pass the bare name only: it must be made up of letters, digits, '.', "
+                "'-' and '_'. Anything else — '/', '\\', '?', '#', '%', whitespace — is "
+                "rejected, as is a name containing '..'."
             ),
         ),
         end: str | None = Field(
@@ -335,9 +369,10 @@ class NGSIEMModule(BaseModule):
         scanned events (a real negative) or scanned none (unresolved). Search times out
         after FALCON_MCP_NGSIEM_TIMEOUT seconds (default: 300).
         """
-        # `repository` is interpolated into the request path, so validate it before it
-        # can reach any of the three calls below.
-        repository_error = _validate_repository(repository)
+        # `repository` is interpolated into the request path, so resolve and validate it
+        # before it can reach any of the three calls below — the start, every poll, and
+        # the timeout stop all route on this same value.
+        repository, repository_error = _validate_repository(repository)
         if repository_error is not None:
             return repository_error
 
