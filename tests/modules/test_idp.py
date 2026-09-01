@@ -9,6 +9,42 @@ from pydantic.fields import FieldInfo
 from falcon_mcp.modules.idp import IdpModule
 from tests.modules.utils.test_modules import TestModules
 
+# Entity ID payload that used to break out of the GraphQL string literal it was
+# interpolated into and append attacker-chosen fields to the query document.
+GRAPHQL_INJECTION_ENTITY_ID = (
+    'x", "y"], types: [USER], first: 200) { nodes { entityId '
+    "associations: accounts { ... on ActiveDirectoryAccountDescriptor { samAccountName } } } } "
+    'dummy: entities(entityIds: ["z'
+)
+
+
+def strip_graphql_string_literals(document: str) -> str:
+    """Replace every GraphQL string literal in a document with an empty literal.
+
+    What remains is the structure of the document, so tests can assert that
+    interpolated values contribute string data only.
+    """
+    result = []
+    index = 0
+    while index < len(document):
+        char = document[index]
+        if char != '"':
+            result.append(char)
+            index += 1
+            continue
+        # Skip over the literal, honouring backslash escapes
+        index += 1
+        while index < len(document):
+            if document[index] == "\\":
+                index += 2
+                continue
+            if document[index] == '"':
+                index += 1
+                break
+            index += 1
+        result.append('""')
+    return "".join(result)
+
 
 class TestIdpModule(TestModules):
     """Test cases for the IDP module."""
@@ -863,6 +899,141 @@ class TestIdpModule(TestModules):
         self.module.investigate_entity(email_addresses="*@example.com")
 
         self.assertTrue(self.mock_client.command.called)
+
+    # ==========================================
+    # GraphQL injection regression tests
+    # ==========================================
+
+    def test_investigate_entity_rejects_graphql_injection_in_entity_ids(self):
+        """entity_ids carrying GraphQL syntax must be rejected before any API call."""
+        result = self.module.investigate_entity(
+            entity_ids=[GRAPHQL_INJECTION_ENTITY_ID],
+            investigation_types=["relationship_analysis"],
+        )
+
+        self.assertIn("error", result)
+        self.assertIn("Invalid entity ID format", result["error"])
+        self.assertEqual(result["investigation_summary"]["status"], "failed")
+        # No query may be sent to the GraphQL API for a rejected entity ID
+        self.mock_client.command.assert_not_called()
+
+    def test_resolve_entities_rejects_malformed_entity_ids(self):
+        """Only entity IDs matching the strict identifier format are accepted."""
+        for invalid_id in ['a" b', "a\\b", "a{b}", "with space", "id\nid", "", "x" * 256, 123]:
+            with self.subTest(entity_id=invalid_id):
+                result = self.module._resolve_entities({"entity_ids": [invalid_id], "limit": 10})
+                self.assertIsInstance(result, dict)
+                self.assertIn("error", result)
+
+        valid_ids = [
+            "test-entity-123",
+            "8ab8a1c9-a1d6-4b3a-9f00-000000000001",
+            "S-1-5-21-1004336348-1177238915-682003330-512",
+        ]
+        result = self.module._resolve_entities({"entity_ids": valid_ids, "limit": 10})
+        self.assertCountEqual(result, valid_ids)
+
+        # Surrounding whitespace is trimmed rather than rejected
+        result = self.module._resolve_entities({"entity_ids": ["  test-entity-123\n"], "limit": 10})
+        self.assertEqual(result, ["test-entity-123"])
+
+    def test_resolve_entities_error_message_is_bounded(self):
+        """A large batch of rejected IDs must not inflate the error response."""
+        result = self.module._resolve_entities(
+            {"entity_ids": [f'"bad-id-{i}"' for i in range(1000)], "limit": 10}
+        )
+
+        self.assertIn("error", result)
+        self.assertIn("and 995 more", result["error"])
+        self.assertLess(len(result["error"]), 1000)
+
+    def test_investigate_entity_rejects_malformed_timeline_event_types(self):
+        """Malformed event types must fail closed, not silently drop the filter."""
+        for invalid_event_type in [
+            "ACTIVITY, NOTIFICATION",
+            "THREAT]) { nodes { eventId } } evil: timeline(first: 1",
+            "null",
+            "true",
+            "1ACTIVITY",
+            "ACTIVITY\n",
+        ]:
+            with self.subTest(event_type=invalid_event_type):
+                result = self.module.investigate_entity(
+                    entity_ids=["test-entity-123"],
+                    investigation_types=["timeline_analysis"],
+                    timeline_event_types=[invalid_event_type],
+                )
+
+                self.assertIn("error", result)
+                self.assertIn("Invalid timeline event type(s)", result["error"])
+                self.assertEqual(result["investigation_summary"]["status"], "failed")
+                self.mock_client.command.assert_not_called()
+
+    def test_investigate_entity_accepts_documented_timeline_event_types(self):
+        """The documented event categories must still reach the API."""
+        self.mock_client.command.return_value = {
+            "status_code": 200,
+            "body": {"data": {"timeline": {"nodes": [], "pageInfo": {}}}},
+        }
+
+        result = self.module.investigate_entity(
+            entity_ids=["test-entity-123"],
+            investigation_types=["timeline_analysis"],
+            timeline_event_types=["ACTIVITY", "NOTIFICATION", "THREAT", "AUDIT"],
+        )
+
+        self.assertNotIn("error", result)
+        query = self.mock_client.command.call_args[1]["body"]["query"]
+        self.assertIn("categories: [ACTIVITY, NOTIFICATION, THREAT, AUDIT]", query)
+
+    def test_graphql_queries_encode_entity_ids_as_string_literals(self):
+        """Injected syntax stays inside string literals and cannot reshape the query."""
+        timeline_query = self.module._build_timeline_query(
+            entity_id=GRAPHQL_INJECTION_ENTITY_ID,
+            start_time='2024-01-01T00:00:00Z", evil: "x',
+            end_time=None,
+            event_types=["ACTIVITY", "THREAT]) { nodes { eventId } } evil: timeline(first: 1"],
+            limit=10,
+        )
+        relationship_query = self.module._build_relationship_analysis_query(
+            entity_id=GRAPHQL_INJECTION_ENTITY_ID,
+            relationship_depth=1,
+            include_risk_context=False,
+            limit=10,
+        )
+
+        for query in (timeline_query, relationship_query):
+            # Outside of string literals, none of the injected syntax survives
+            structure = strip_graphql_string_literals(query)
+            for injected in ("dummy", "evil", "samAccountName", "types: [USER]"):
+                self.assertNotIn(injected, structure)
+            self.assertEqual(structure.count("{"), structure.count("}"))
+            self.assertEqual(structure.count("("), structure.count(")"))
+            self.assertEqual(structure.count("["), structure.count("]"))
+
+        # Invalid enum names are dropped, valid ones are preserved
+        self.assertIn("categories: [ACTIVITY]", timeline_query)
+
+        # Legitimate identifiers still render as plain string literals
+        self.assertIn(
+            'sourceEntityQuery: {entityIds: ["test-entity-123"]}',
+            self.module._build_timeline_query(
+                entity_id="test-entity-123",
+                start_time=None,
+                end_time=None,
+                event_types=None,
+                limit=10,
+            ),
+        )
+        self.assertIn(
+            'entities(entityIds: ["test-entity-123"], first: 10)',
+            self.module._build_relationship_analysis_query(
+                entity_id="test-entity-123",
+                relationship_depth=1,
+                include_risk_context=False,
+                limit=10,
+            ),
+        )
 
 
 if __name__ == "__main__":
