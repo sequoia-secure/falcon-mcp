@@ -7,6 +7,7 @@ from mcp.server.fastmcp.resources import TextResource
 from mcp.types import ToolAnnotations
 from pydantic import AnyUrl, Field
 
+from falcon_mcp.common.errors import _format_error_response
 from falcon_mcp.common.logging import get_logger
 from falcon_mcp.modules.base import BaseModule
 from falcon_mcp.resources.shield import SHIELD_QUERY_DOCUMENTATION
@@ -880,10 +881,13 @@ class ShieldModule(BaseModule):
                 " This is written to the audit log and visible to other administrators."
             ),
         ),
-        entities: str | None = Field(
+        entities: list[str] | None = Field(
             default=None,
             description=(
-                "Comma-separated entity names to dismiss."
+                "List of entity names to dismiss, one entity name per list item."
+                " Copy each name verbatim from `get_shield_check_affected_entities`; names are sent"
+                " to the API exactly as given and are never split on commas or any other delimiter,"
+                " so an entity name that itself contains a comma must stay a single list item."
                 " If omitted, dismisses the entire check for all entities."
                 " If provided, only the specified entities are dismissed and the check remains active for others."
             ),
@@ -895,11 +899,33 @@ class ShieldModule(BaseModule):
         the entire check for all entities, or provide specific entity names to dismiss only those.
         This action is permanent and cannot be undone from the API — the dismissal reason is recorded
         in audit logs."""
-        if isinstance(entities, str):
+        # Entity names come from the monitored SaaS environment and may contain any
+        # character, so they are only ever accepted as discrete list items. A single
+        # string is rejected rather than split or treated as "no entities", which would
+        # dismiss the check for every entity.
+        if isinstance(entities, str) or (
+            isinstance(entities, list)
+            and not all(isinstance(entity, str) and entity for entity in entities)
+        ):
+            return _format_error_response(
+                "Failed to dismiss Shield check: 'entities' must be a list of non-empty entity"
+                " name strings, with each entity name as its own item. Entity names are used"
+                " verbatim and are never split on commas, so pass them exactly as returned by"
+                " `get_shield_check_affected_entities`.",
+                operation="DismissAffectedEntityV3",
+            )
+
+        if isinstance(entities, list):
+            if not entities:
+                return _format_error_response(
+                    "Failed to dismiss Shield check: 'entities' was provided but empty. Omit"
+                    " 'entities' entirely to dismiss the whole check for all entities.",
+                    operation="DismissAffectedEntityV3",
+                )
             operation = "DismissAffectedEntityV3"
             body = {
                 "reason": reason,
-                "entities": [e.strip() for e in entities.split(",")],
+                "entities": list(entities),
             }
         else:
             operation = "DismissSecurityCheckV3"

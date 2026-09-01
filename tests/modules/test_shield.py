@@ -561,7 +561,7 @@ class TestShieldModule(TestModules):
         }
 
         result = self.module.dismiss_shield_check(
-            id="check-1", reason="User exception", entities="user@ex.com,admin@ex.com"
+            id="check-1", reason="User exception", entities=["user@ex.com", "admin@ex.com"]
         )
 
         call_args = self.mock_client.command.call_args
@@ -571,6 +571,69 @@ class TestShieldModule(TestModules):
         self.assertEqual(call_args[1]["body"]["entities"], ["user@ex.com", "admin@ex.com"])
         self.assertNotIn("id", call_args[1]["body"])
         self.assertEqual(len(result), 1)
+
+    def test_dismiss_shield_check_entity_name_with_comma_is_not_split(self):
+        """An entity name containing a comma is sent verbatim as a single entity."""
+        self.mock_client.command.return_value = {
+            "status_code": 200,
+            "body": {"resources": [{"id": "check-1", "dismissed_entities": []}]},
+        }
+
+        self.module.dismiss_shield_check(
+            id="check-1",
+            reason="Approved app",
+            entities=["Test Integration, Finance Admin"],
+        )
+
+        call_args = self.mock_client.command.call_args
+        self.assertEqual(call_args[0][0], "DismissAffectedEntityV3")
+        self.assertEqual(call_args[1]["body"]["entities"], ["Test Integration, Finance Admin"])
+
+    def test_dismiss_shield_check_entity_names_preserve_whitespace(self):
+        """Entity names are not stripped or otherwise rewritten."""
+        self.mock_client.command.return_value = {
+            "status_code": 200,
+            "body": {"resources": [{"id": "check-1", "dismissed_entities": []}]},
+        }
+
+        self.module.dismiss_shield_check(
+            id="check-1", reason="Known risk", entities=[" padded name ", "second, entity"]
+        )
+
+        call_args = self.mock_client.command.call_args
+        self.assertEqual(
+            call_args[1]["body"]["entities"], [" padded name ", "second, entity"]
+        )
+
+    def test_dismiss_shield_check_rejects_string_entities(self):
+        """A single string is rejected instead of being split or dismissing everything."""
+        result = self.module.dismiss_shield_check(
+            id="check-1", reason="Accepted risk", entities="user@ex.com,admin@ex.com"
+        )
+
+        self.assertIn("error", result)
+        self.mock_client.command.assert_not_called()
+
+    def test_dismiss_shield_check_rejects_empty_entities_list(self):
+        """An empty list does not silently dismiss the check for all entities."""
+        result = self.module.dismiss_shield_check(
+            id="check-1", reason="Accepted risk", entities=[]
+        )
+
+        self.assertIn("error", result)
+        self.mock_client.command.assert_not_called()
+
+    def test_dismiss_shield_check_rejects_non_string_entities(self):
+        """Non-string or empty entity names are rejected."""
+        for bad_entities in ([""], ["ok", None], ["ok", ["nested"]]):
+            with self.subTest(entities=bad_entities):
+                self.mock_client.command.reset_mock()
+                result = self.module.dismiss_shield_check(
+                    id="check-1", reason="Accepted risk", entities=bad_entities
+                )
+
+                self.assertIn("error", result)
+                self.mock_client.command.assert_not_called()
 
     def test_dismiss_shield_check_api_error(self):
         self.mock_client.command.return_value = {
