@@ -7,6 +7,7 @@ Core use cases:
 """
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +19,70 @@ from falcon_mcp.common.utils import sanitize_input, unwrap_field_default
 from falcon_mcp.modules.base import BaseModule
 
 logger = get_logger(__name__)
+
+# Caller-supplied entity IDs are opaque identifiers that end up inside GraphQL
+# documents. Restrict them to a conservative character set (UUIDs, base64url,
+# SIDs, "entity-001"-style IDs) so they can never carry GraphQL syntax such as
+# quotes, braces or parentheses.
+_ENTITY_ID_PATTERN = re.compile(r"\A[A-Za-z0-9._:@=+/-]{1,255}\Z")
+
+# Timeline categories are interpolated as unquoted GraphQL enum values, so they
+# cannot be escaped as string data and must be well-formed enum names.
+_GRAPHQL_ENUM_NAME_PATTERN = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+
+# Names that GraphQL excludes from enum values even though they are valid names.
+_GRAPHQL_RESERVED_ENUM_NAMES = frozenset({"true", "false", "null"})
+
+
+def _is_graphql_enum_name(value: Any) -> bool:
+    """Check whether a value can be safely used as an unquoted GraphQL enum value.
+
+    Args:
+        value: Value to check
+
+    Returns:
+        bool: True if the value is a valid GraphQL enum name
+    """
+    if not isinstance(value, str) or value in _GRAPHQL_RESERVED_ENUM_NAMES:
+        return False
+    return bool(_GRAPHQL_ENUM_NAME_PATTERN.match(value))
+
+
+def _format_rejected_values(values: list[Any], max_shown: int = 5) -> str:
+    """Format rejected input values for an error message.
+
+    Each value is truncated before it is sanitized and only the first few are
+    listed, so a large or long input cannot inflate the error response.
+
+    Args:
+        values: Rejected values
+        max_shown: Maximum number of values to list
+
+    Returns:
+        str: Comma-separated summary of the rejected values
+    """
+    shown = [sanitize_input(str(value)[:64]) for value in values[:max_shown]]
+    remaining = len(values) - len(shown)
+    if remaining > 0:
+        shown.append(f"and {remaining} more")
+    return ", ".join(shown)
+
+
+def _graphql_string(value: Any) -> str:
+    """Encode a value as a GraphQL string literal.
+
+    JSON string escaping is a subset of GraphQL string escaping, so the result is
+    always a single, fully escaped GraphQL string literal. This guarantees the
+    value can only be read as string data and never alters the structure of the
+    surrounding query document.
+
+    Args:
+        value: Value to encode
+
+    Returns:
+        str: Quoted and escaped GraphQL string literal
+    """
+    return json.dumps(value if isinstance(value, str) else str(value))
 
 
 class IdpModule(BaseModule):
@@ -156,6 +221,13 @@ class IdpModule(BaseModule):
         if validation_error:
             return validation_error
 
+        validation_error = self._validate_timeline_event_types(
+            timeline_event_types,
+            investigation_types,
+        )
+        if validation_error:
+            return validation_error
+
         # Step 2: Entity Resolution - Find entities from various identifiers
         logger.debug("Resolving entities from provided identifiers")
         search_criteria = {
@@ -282,6 +354,35 @@ class IdpModule(BaseModule):
                     "status": "failed",
                 },
             }
+
+        return None
+
+    def _validate_timeline_event_types(self, timeline_event_types, investigation_types):
+        """Validate timeline event types before they reach a GraphQL document.
+
+        Event types become unquoted GraphQL enum values, so they cannot be escaped
+        as string data. Reject malformed values instead of dropping them, which
+        would silently widen the timeline to every category.
+        """
+        if not timeline_event_types or not isinstance(timeline_event_types, list):
+            return None
+
+        invalid_event_types = [
+            event_type
+            for event_type in timeline_event_types
+            if not _is_graphql_enum_name(event_type)
+        ]
+        if invalid_event_types:
+            return self._create_error_response(
+                (
+                    "Invalid timeline event type(s): "
+                    f"{_format_rejected_values(invalid_event_types)}. "
+                    "Each event type must be a single event category name such as "
+                    "'ACTIVITY', 'NOTIFICATION' or 'THREAT'."
+                ),
+                0,
+                investigation_types,
+            )
 
         return None
 
@@ -492,16 +593,27 @@ class IdpModule(BaseModule):
         limit: int,
     ) -> str:
         """Build GraphQL query for entity timeline."""
-        filters = [f'sourceEntityQuery: {{entityIds: ["{entity_id}"]}}']
+        # All interpolated values are encoded as GraphQL string literals so they
+        # cannot break out and alter the structure of the query document.
+        filters = [f"sourceEntityQuery: {{entityIds: [{_graphql_string(entity_id)}]}}"]
 
         if start_time and isinstance(start_time, str):
-            filters.append(f'startTime: "{start_time}"')
+            filters.append(f"startTime: {_graphql_string(start_time)}")
         if end_time and isinstance(end_time, str):
-            filters.append(f'endTime: "{end_time}"')
+            filters.append(f"endTime: {_graphql_string(end_time)}")
         if event_types and isinstance(event_types, list):
-            # Format event types as unquoted GraphQL enums
-            categories_str = "[" + ", ".join(event_types) + "]"
-            filters.append(f"categories: {categories_str}")
+            # Format event types as unquoted GraphQL enums. Enums cannot be quoted,
+            # so only well-formed enum names are accepted; anything else is dropped.
+            # Callers are rejected earlier by _validate_timeline_event_types, so this
+            # is a last line of defense rather than the primary filter.
+            valid_event_types = [
+                event_type for event_type in event_types if _is_graphql_enum_name(event_type)
+            ]
+            if len(valid_event_types) != len(event_types):
+                logger.warning("Ignoring timeline event types that are not valid enum names")
+            if valid_event_types:
+                categories_str = "[" + ", ".join(valid_event_types) + "]"
+                filters.append(f"categories: {categories_str}")
 
         filter_string = ", ".join(filters)
 
@@ -804,9 +916,11 @@ class IdpModule(BaseModule):
 
         association_fields = build_association_fields(relationship_depth)
 
+        # entity_id is encoded as a GraphQL string literal so it can only be read
+        # as string data and never alters the structure of the query document.
         return f"""
         query {{
-            entities(entityIds: ["{entity_id}"], first: {limit}) {{
+            entities(entityIds: [{_graphql_string(entity_id)}], first: {limit}) {{
                 nodes {{
                     entityId
                     primaryDisplayName
@@ -863,10 +977,31 @@ class IdpModule(BaseModule):
         """
         resolved_ids = []
 
-        # Direct entity IDs - no resolution needed
+        # Direct entity IDs - no lookup needed, but they are caller-supplied and
+        # flow into GraphQL documents, so enforce a strict identifier format.
         entity_ids = identifiers.get("entity_ids")
         if entity_ids and isinstance(entity_ids, list):
-            resolved_ids.extend(entity_ids)
+            # Surrounding whitespace is a common formatting slip, not an identifier
+            # difference, so trim it and validate what is left.
+            normalized_ids = [
+                entity_id.strip() if isinstance(entity_id, str) else entity_id
+                for entity_id in entity_ids
+            ]
+            invalid_ids = [
+                entity_id
+                for entity_id in normalized_ids
+                if not isinstance(entity_id, str) or not _ENTITY_ID_PATTERN.match(entity_id)
+            ]
+            if invalid_ids:
+                return {
+                    "error": (
+                        "Invalid entity ID format: entity IDs may only contain letters, digits "
+                        "and the characters . _ : @ = + / - (1-255 characters). "
+                        f"Rejected value(s): {_format_rejected_values(invalid_ids)}. "
+                        "No entities were looked up; correct or remove these IDs and retry."
+                    )
+                }
+            resolved_ids.extend(normalized_ids)
 
         # Check if we have conflicting entity types (USER vs ENDPOINT)
         email_addresses = identifiers.get("email_addresses")
