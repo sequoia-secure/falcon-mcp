@@ -815,8 +815,8 @@ class TestNGSIEMModule(TestModules):
 
         FastMCP resolves defaults before dispatch, so this only happens on a direct
         call, but the object must not reach the request path: FalconPy would format its
-        repr in, and that repr embeds the field description — slashes included. Resolve
-        it to the declared default instead.
+        repr in, and that repr embeds the field description — slashes included. Take the
+        field's declared default and validate that instead.
         """
         repository, error = _validate_repository(
             inspect.signature(NGSIEMModule.search_ngsiem).parameters["repository"].default
@@ -824,6 +824,42 @@ class TestNGSIEMModule(TestModules):
 
         self.assertIsNone(error)
         self.assertEqual(repository, "search-all")
+
+    def test_a_non_str_repository_is_rejected_rather_than_defaulted(self):
+        """Only a `FieldInfo` is a default to resolve; anything else is a caller error.
+
+        FastMCP never reaches this — Pydantic rejects a non-str for a `str` field, and
+        decodes `bytes` before dispatch — so this guards a direct Python caller. Quietly
+        substituting the default there would search a repository the caller did not ask
+        for and report success, which is worse than an error.
+        """
+        for bogus in (123, None, True, 1.5, ["search-all"], {"a": "b"}, b"search-all"):
+            with self.subTest(value=bogus):
+                repository, error = _validate_repository(bogus)
+
+                self.assertIsNotNone(error)
+                self.assertIn("repository", error["error"])
+                self.assertIsInstance(repository, str)
+
+    def test_an_oversized_repository_is_rejected_without_echoing_all_of_it(self):
+        """The rejection message goes into the model's context and the server log.
+
+        Quoting the offending value back is what makes the error actionable, but an
+        unbounded value would put a megabyte in both places, so cap the name and
+        truncate what is quoted.
+        """
+        huge = "a" * 1_000_000
+        repository, error = _validate_repository(huge)
+
+        self.assertIsNotNone(error)
+        self.assertNotIn(huge, error["error"])
+        self.assertLess(len(error["error"]), 500)
+        self.assertIn("truncated", error["error"])
+        self.assertEqual(repository, huge)
+
+        # The bound itself: at the limit is fine, one over is not.
+        self.assertIsNone(_validate_repository("a" * 255)[1])
+        self.assertIsNotNone(_validate_repository("a" * 256)[1])
 
     @patch("falcon_mcp.modules.ngsiem.asyncio.sleep", new_callable=AsyncMock)
     def test_omitted_repository_reaches_the_api_as_the_default_name(self, mock_sleep):

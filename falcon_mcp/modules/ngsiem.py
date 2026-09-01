@@ -14,6 +14,7 @@ from typing import Any
 from mcp.server import FastMCP
 from mcp.server.fastmcp.resources import TextResource
 from pydantic import AnyUrl, Field
+from pydantic.fields import FieldInfo
 
 from falcon_mcp.common.errors import _format_error_response, handle_api_response
 from falcon_mcp.common.logging import get_logger
@@ -51,9 +52,9 @@ TIMEOUT_SECONDS = int(os.environ.get("FALCON_MCP_NGSIEM_TIMEOUT", "300"))
 # `repository` is the only caller-supplied value in this server that reaches a URL
 # path variable (/humio/api/v1/repositories/{repository}/queryjobs, shared by
 # StartSearchV1, GetSearchStatusV1 and StopSearchV1). FalconPy interpolates it into
-# the route without percent-encoding it, and `requests` then parses and normalizes
-# the result, so any character that is reserved in a URL retargets the request at a
-# route the calling operation never selected:
+# the route without percent-encoding it, and `requests` then parses the result, so a
+# character that ends or extends the path retargets the request at a route the calling
+# operation never selected:
 #
 #   "a/../../oauth2/token" -> POST /humio/api/v1/oauth2/token/queryjobs
 #                             (dot-segments normalize away the repositories prefix)
@@ -62,11 +63,18 @@ TIMEOUT_SECONDS = int(os.environ.get("FALCON_MCP_NGSIEM_TIMEOUT", "300"))
 #   "search-all#"          -> POST /humio/api/v1/repositories/search-all
 #                             ('#' starts a fragment, dropping the /queryjobs suffix)
 #
+# Only '/', '?' and '#' retarget the request in the client itself; '%' is passed
+# through literally, so it leaves the decoding to whatever sits in front of the API.
+# The rest of what this rejects — '\', ';', ':', '@', whitespace, control characters —
+# is legal inside one path segment and `requests` encodes or keeps it, so it does not
+# move the route here; it is refused because the guard is a positive allow-list and
+# because intermediaries do not agree on it (a proxy that folds '\' to '/', a server
+# that reads ';' as a matrix parameter).
+#
 # So constrain the value to what can only ever be one literal path segment: the
-# characters repository and view names are actually built from. Every separator
-# ('/', '\'), URL delimiter ('?', '#', ';', ':', '@'), escape ('%'), whitespace and
-# control character falls outside that set, which leaves the request able to reach
-# only /humio/api/v1/repositories/<name>/... — the route the operation selected.
+# characters repository and view names are actually built from. That leaves the
+# request able to reach only /humio/api/v1/repositories/<name>/... — the route the
+# operation selected.
 #
 # Deliberately a character allow-list rather than a list of known repository names:
 # the field advertises that custom views may be passed by name and those are
@@ -84,18 +92,31 @@ _REPOSITORY_PATTERN = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9._-]*\Z")
 # widened.
 _DOT_RUN = ".."
 
-# Substituted for an unresolved Pydantic `Field` default; see `_validate_repository`.
-_DEFAULT_REPOSITORY = "search-all"
+# No real repository name comes close to this, and an unbounded one is echoed by the
+# rejection message into both the model's context and the server log.
+_MAX_REPOSITORY_LENGTH = 255
+
+# How much of a rejected value the error message quotes back, so that a caller that
+# sends a megabyte does not get a megabyte logged and returned.
+_MAX_ECHOED_REPOSITORY = 64
+
+
+def _echo_repository(repository: str) -> str:
+    """Quote a rejected repository for an error message, truncated if it is huge.
+
+    Args:
+        repository: The rejected value
+
+    Returns:
+        Its repr, shortened with a note when longer than `_MAX_ECHOED_REPOSITORY`
+    """
+    if len(repository) <= _MAX_ECHOED_REPOSITORY:
+        return repr(repository)
+    return f"{repository[:_MAX_ECHOED_REPOSITORY]!r} (truncated, {len(repository)} characters)"
 
 
 def _validate_repository(repository: Any) -> tuple[str, dict[str, Any] | None]:
     """Resolve a repository value and reject one that would change the route called.
-
-    A non-str value is an unresolved Pydantic `Field` default, which happens only when
-    the tool method is called directly instead of through FastMCP — the same reason
-    `end` is guarded with `isinstance` below. Substitute the declared default rather
-    than pass the object on: FalconPy would format its repr into the request path, and
-    that repr carries slashes from the field's own description.
 
     Args:
         repository: The caller-supplied repository or view name
@@ -105,8 +126,24 @@ def _validate_repository(repository: Any) -> tuple[str, dict[str, Any] | None]:
         request; `error` is an error response to hand straight back to the caller,
         and is None exactly when the repository is safe to interpolate into the path.
     """
+    if isinstance(repository, FieldInfo):
+        # An unresolved Pydantic `Field` default, which happens only when the tool
+        # method is called directly instead of through FastMCP — the same reason `end`
+        # is guarded with `isinstance` below. Take the declared default and validate
+        # that, rather than pass the object on: FalconPy would format its repr into the
+        # request path, and that repr carries slashes from the field's own description.
+        repository = repository.default
+
     if not isinstance(repository, str):
-        return _DEFAULT_REPOSITORY, None
+        # Anything else non-str is a caller mistake, not a default to resolve. FastMCP
+        # never gets here (Pydantic rejects a non-str for a `str` field, and decodes
+        # `bytes` before dispatch), so this only catches a direct Python caller — which
+        # must not silently search a repository it did not ask for.
+        return "", _format_error_response(
+            "Invalid repository: must be a repository or view name as a string, got "
+            f"{type(repository).__name__}.",
+            operation="StartSearchV1",
+        )
 
     if not repository.strip():
         return repository, _format_error_response(
@@ -115,13 +152,17 @@ def _validate_repository(repository: Any) -> tuple[str, dict[str, Any] | None]:
             operation="StartSearchV1",
         )
 
-    if not _REPOSITORY_PATTERN.fullmatch(repository) or _DOT_RUN in repository:
+    if (
+        len(repository) > _MAX_REPOSITORY_LENGTH
+        or not _REPOSITORY_PATTERN.fullmatch(repository)
+        or _DOT_RUN in repository
+    ):
         return repository, _format_error_response(
-            f"Invalid repository {repository!r}: pass a bare repository or view name "
-            "made up of letters, digits, '.', '-' and '_', for example 'search-all'. "
-            "The name is used as a single URL path segment, so path separators ('/', "
-            "'\\'), URL delimiters such as '?' and '#', '%', whitespace and '..' are "
-            "rejected.",
+            f"Invalid repository {_echo_repository(repository)}: pass a bare repository "
+            "or view name made up of letters, digits, '.', '-' and '_', at most "
+            f"{_MAX_REPOSITORY_LENGTH} characters, for example 'search-all'. The name is "
+            "used as a single URL path segment, so path separators ('/', '\\'), URL "
+            "delimiters such as '?' and '#', '%', whitespace and '..' are rejected.",
             operation="StartSearchV1",
         )
 
