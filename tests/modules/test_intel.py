@@ -571,6 +571,13 @@ class TestIntelModule(TestModules):
             "WARP\\PANDA",
             'WARP"PANDA',
             "  zzz',name:!'zzz  ",
+            # Globs need no quote at all: name:'*' matches every actor
+            "*",
+            "*PANDA",
+            "FANCY*",
+            "*BEAR*",
+            # Folds into a quote under NFKC (U+FF07 FULLWIDTH APOSTROPHE)
+            "zzz＇,name:!＇zzz",
         ]
 
         for payload in payloads:
@@ -584,6 +591,58 @@ class TestIntelModule(TestModules):
 
                 self.assertEqual(len(result), 1)
                 self.assertEqual(result[0]["error"], "Invalid actor name")
+
+    def test_get_mitre_report_rejects_mismatched_resolved_actor(self):
+        """A lookup that resolves to a different actor errors instead of substituting."""
+        self.mock_client.command.return_value = {
+            "status_code": 200,
+            "body": {"resources": [{"id": "999", "name": "SOME OTHER ACTOR"}]},
+        }
+
+        result = self.module.get_mitre_report(actor="FAKE BEAR", format="json")
+
+        # Only the search ran; no MITRE report was fetched for the wrong actor
+        self.assertEqual(self.mock_client.command.call_count, 1)
+        self.assertEqual(self.mock_client.command.call_args[0][0], "QueryIntelActorEntities")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["error"], "Actor name mismatch")
+        self.assertIn("SOME OTHER ACTOR", result[0]["message"])
+
+    def test_get_mitre_report_accepts_case_insensitive_actor_name(self):
+        """A name differing only in case still resolves."""
+
+        def side_effect(operation, **_):
+            if operation == "QueryIntelActorEntities":
+                return {
+                    "status_code": 200,
+                    "body": {"resources": [{"id": "789012", "name": "FAKE BEAR"}]},
+                }
+            return b'[{"tactic_name": "Fake Tactic"}]'
+
+        self.mock_client.command.side_effect = side_effect
+
+        result = self.module.get_mitre_report(actor="fake bear", format="json")
+
+        self.assertEqual(self.mock_client.command.call_count, 2)
+        second_call = self.mock_client.command.call_args_list[1]
+        self.assertEqual(second_call[0][0], "GetMitreReport")
+        self.assertEqual(second_call[1]["parameters"]["actor_id"], "789012")
+        self.assertEqual(result, [{"tactic_name": "Fake Tactic"}])
+
+    def test_get_mitre_report_non_ascii_digits_are_not_treated_as_id(self):
+        """Non-ASCII digits take the name path (and its validation), not the ID path."""
+        self.mock_client.command.return_value = {
+            "status_code": 200,
+            "body": {"resources": []},
+        }
+
+        result = self.module.get_mitre_report(actor="１２３", format="json")
+
+        # A search was attempted rather than "１２３" being sent as an actor_id
+        self.assertEqual(self.mock_client.command.call_args[0][0], "QueryIntelActorEntities")
+        self.assertEqual(len(result), 1)
+        self.assertIn("Actor not found", result[0]["error"])
 
     def test_get_mitre_report_actor_name_is_stripped_in_filter(self):
         """Surrounding whitespace is trimmed before the name reaches the filter."""

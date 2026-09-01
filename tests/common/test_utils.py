@@ -6,11 +6,11 @@ import unittest
 from unittest.mock import patch
 
 from falcon_mcp.common.utils import (
-    breaks_fql_string_literal,
     extract_first_resource,
     extract_resources,
     filter_none_values,
     generate_md_table,
+    is_safe_fql_literal,
     prepare_api_parameters,
 )
 
@@ -367,8 +367,8 @@ For testing purposes.
         # Check the error message
         self.assertIn("Need at least 2 items", str(context.exception))
 
-    def test_breaks_fql_string_literal_rejects_structure_characters(self):
-        """Values that can close an FQL literal or inject grammar are flagged."""
+    def test_is_safe_fql_literal_rejects_structure_characters(self):
+        """Values that can close an FQL literal or inject grammar are rejected."""
         unsafe = [
             "x',name:!'x",
             "WARP PANDA'",
@@ -382,10 +382,23 @@ For testing purposes.
 
         for value in unsafe:
             with self.subTest(value=value):
-                self.assertTrue(breaks_fql_string_literal(value))
+                self.assertFalse(is_safe_fql_literal(value))
 
-    def test_breaks_fql_string_literal_allows_ordinary_names(self):
-        """Legitimate actor names pass through unflagged."""
+    def test_is_safe_fql_literal_rejects_globs(self):
+        """Glob characters widen the match from inside the literal, so are rejected."""
+        for value in ["*", "*PANDA", "FANCY*", "*BEAR*", "WARP PAND?"]:
+            with self.subTest(value=value):
+                self.assertFalse(is_safe_fql_literal(value))
+
+    def test_is_safe_fql_literal_rejects_nfkc_homoglyphs(self):
+        """Characters that fold into a quote or backslash under NFKC are rejected."""
+        # U+FF07 FULLWIDTH APOSTROPHE -> "'", U+FF3C FULLWIDTH REVERSE SOLIDUS -> "\"
+        for value in ["zzz＇,name:!＇zzz", "WARP＼PANDA", "＊PANDA"]:
+            with self.subTest(value=value):
+                self.assertFalse(is_safe_fql_literal(value))
+
+    def test_is_safe_fql_literal_allows_ordinary_names(self):
+        """Legitimate actor names pass through."""
         safe = [
             "WARP PANDA",
             "revenant spider",
@@ -397,11 +410,11 @@ For testing purposes.
 
         for value in safe:
             with self.subTest(value=value):
-                self.assertFalse(breaks_fql_string_literal(value))
+                self.assertTrue(is_safe_fql_literal(value))
 
-    def test_breaks_fql_string_literal_coerces_non_strings(self):
+    def test_is_safe_fql_literal_coerces_non_strings(self):
         """Non-string input is coerced rather than raising."""
-        self.assertFalse(breaks_fql_string_literal(123456))
+        self.assertTrue(is_safe_fql_literal(123456))
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from mcp.server.fastmcp.resources import TextResource
 from pydantic import AnyUrl, Field
 
 from falcon_mcp.common.logging import get_logger
-from falcon_mcp.common.utils import breaks_fql_string_literal
+from falcon_mcp.common.utils import is_safe_fql_literal
 from falcon_mcp.modules.base import BaseModule
 from falcon_mcp.resources.intel import (
     QUERY_ACTOR_ENTITIES_FQL_DOCUMENTATION,
@@ -328,21 +328,23 @@ class IntelModule(BaseModule):
         # Check if the actor parameter looks like an ID (numeric) or a name
         actor_id = actor.strip()
 
-        # If it's not a numeric ID, search for the actor first
-        if not actor_id.isdigit():
+        # If it's not a numeric ID, search for the actor first. `isdigit()` alone is
+        # true for non-ASCII digits (e.g. "１２３", "٣"), which would skip both this
+        # branch and its validation, so require ASCII digits to take the ID path.
+        if not (actor_id.isascii() and actor_id.isdigit()):
             # The name is interpolated into an FQL string literal below and FQL has
             # no escape sequence for string values, so a name carrying a quote,
-            # backslash, or control character is rejected. Otherwise it could close
-            # the literal and inject query grammar (e.g. "x',name:!'x" matches
-            # everything), silently resolving a different actor than the one asked
-            # for.
-            if breaks_fql_string_literal(actor_id):
+            # backslash, glob, or control character is rejected. Otherwise it could
+            # close the literal and inject query grammar ("x',name:!'x") or widen the
+            # match from inside it ("*"), either way resolving an arbitrary actor
+            # while the response still claims to be the one that was asked for.
+            if not is_safe_fql_literal(actor_id):
                 return [{
                     "error": "Invalid actor name",
                     "message": (
-                        "Actor name must not contain quote, backslash, or control "
-                        "characters. Use falcon_search_actors to look up the actor, "
-                        "then pass its numeric ID."
+                        "Actor name must not contain quote, backslash, wildcard, or "
+                        "control characters. Use falcon_search_actors to look up the "
+                        "actor, then pass its numeric ID."
                     ),
                 }]
 
@@ -371,6 +373,21 @@ class IntelModule(BaseModule):
 
             # Get the first (and should be only) result
             selected_actor = search_results[0]
+
+            # Confirm the actor that came back is the one that was asked for. The
+            # filter above is a plain (non-bracketed) match, so a broader hit can
+            # still surface a different actor; returning its TTPs under the
+            # requested name would quietly mislead the analyst.
+            resolved_name = str(selected_actor.get("name", ""))
+            if resolved_name.strip().casefold() != actor_id.casefold():
+                return [{
+                    "error": "Actor name mismatch",
+                    "message": (
+                        f"Requested actor '{actor_id}' but the lookup resolved to "
+                        f"'{resolved_name}'. Re-run with the exact actor name or its "
+                        "numeric ID."
+                    ),
+                }]
 
             # Extract the numeric ID
             actor_id = str(selected_actor.get('id', ''))

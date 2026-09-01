@@ -5,6 +5,7 @@ This module provides common utility functions for the Falcon MCP server.
 """
 
 import re
+import unicodedata
 from typing import Any, Optional
 
 from .errors import _format_error_response, is_success_response
@@ -107,30 +108,41 @@ def sanitize_input(input_str: str) -> str:
     return sanitized[:255]
 
 
-# Characters that terminate or escape a single-quoted FQL string literal, plus
-# control characters. FQL defines no escape sequence for string values, so a
-# value containing one of these cannot be embedded safely in a composed filter.
-_FQL_LITERAL_BREAKERS = re.compile(r"['\"\\]|[\x00-\x1f\x7f]")
+# Characters that stop a value inside a single-quoted FQL literal from matching
+# as plain data:
+#   ' " \      close or escape the literal, exposing the rest as query grammar
+#   * ?        glob inside the literal (see FQL_BASE_OPERATORS: 'partial*')
+#   control    non-printables with no legitimate place in a literal
+# FQL defines no escape sequence for string values, so a value containing one of
+# these cannot be embedded safely in a composed filter.
+_FQL_UNSAFE_LITERAL_CHARS = re.compile(r"['\"\\*?]|[\x00-\x1f\x7f]")
 
 
-def breaks_fql_string_literal(value: str) -> bool:
-    """Report whether a value can break out of a single-quoted FQL string literal.
+def is_safe_fql_literal(value: str) -> bool:
+    """Report whether a value can be safely interpolated into a quoted FQL literal.
 
-    Callers that interpolate a value into an FQL filter (e.g. ``name:'{value}'``)
-    must use this to reject unsafe values first. A quote, backslash, or control
-    character would otherwise end the literal early and let the remaining text be
-    parsed as query grammar, changing which records the filter matches.
+    Callers that build an FQL filter by interpolation (e.g. ``name:'{value}'``)
+    must reject values this rejects. Two separate hazards are covered: a quote or
+    backslash ends the literal early and lets the remaining text be parsed as
+    query grammar, and a glob character widens the match from inside the literal.
+    Either one changes which records the filter selects.
 
     Args:
         value: Value destined for interpolation into an FQL string literal
 
     Returns:
-        bool: True if the value must not be interpolated into a filter
+        bool: True if the value is safe to interpolate into a filter
     """
     if not isinstance(value, str):
         value = str(value)
 
-    return bool(_FQL_LITERAL_BREAKERS.search(value))
+    if _FQL_UNSAFE_LITERAL_CHARS.search(value):
+        return False
+
+    # A homoglyph such as U+FF07 FULLWIDTH APOSTROPHE is not itself a quote but
+    # folds into one under NFKC, so reject anything that becomes unsafe if a
+    # downstream consumer normalizes before parsing.
+    return not _FQL_UNSAFE_LITERAL_CHARS.search(unicodedata.normalize("NFKC", value))
 
 
 def generate_md_table(data: list[tuple]) -> str:
