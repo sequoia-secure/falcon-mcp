@@ -107,6 +107,32 @@ def sanitize_input(input_str: str) -> str:
     return sanitized[:255]
 
 
+# Characters that terminate or escape a single-quoted FQL string literal, plus
+# control characters. FQL defines no escape sequence for string values, so a
+# value containing one of these cannot be embedded safely in a composed filter.
+_FQL_LITERAL_BREAKERS = re.compile(r"['\"\\]|[\x00-\x1f\x7f]")
+
+
+def breaks_fql_string_literal(value: str) -> bool:
+    """Report whether a value can break out of a single-quoted FQL string literal.
+
+    Callers that interpolate a value into an FQL filter (e.g. ``name:'{value}'``)
+    must use this to reject unsafe values first. A quote, backslash, or control
+    character would otherwise end the literal early and let the remaining text be
+    parsed as query grammar, changing which records the filter matches.
+
+    Args:
+        value: Value destined for interpolation into an FQL string literal
+
+    Returns:
+        bool: True if the value must not be interpolated into a filter
+    """
+    if not isinstance(value, str):
+        value = str(value)
+
+    return bool(_FQL_LITERAL_BREAKERS.search(value))
+
+
 def generate_md_table(data: list[tuple]) -> str:
     """Generate a Markdown table from a list of tuples.
 

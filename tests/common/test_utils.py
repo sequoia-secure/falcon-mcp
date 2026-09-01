@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from falcon_mcp.common.utils import (
+    breaks_fql_string_literal,
     extract_first_resource,
     extract_resources,
     filter_none_values,
@@ -365,6 +366,42 @@ For testing purposes.
         
         # Check the error message
         self.assertIn("Need at least 2 items", str(context.exception))
+
+    def test_breaks_fql_string_literal_rejects_structure_characters(self):
+        """Values that can close an FQL literal or inject grammar are flagged."""
+        unsafe = [
+            "x',name:!'x",
+            "WARP PANDA'",
+            'WARP"PANDA',
+            "WARP\\PANDA",
+            "WARP\nPANDA",
+            "WARP\tPANDA",
+            "WARP\x00PANDA",
+            "WARP\x7fPANDA",
+        ]
+
+        for value in unsafe:
+            with self.subTest(value=value):
+                self.assertTrue(breaks_fql_string_literal(value))
+
+    def test_breaks_fql_string_literal_allows_ordinary_names(self):
+        """Legitimate actor names pass through unflagged."""
+        safe = [
+            "WARP PANDA",
+            "revenant spider",
+            "FANCY BEAR-2",
+            "actor_name.42",
+            "Ürsa Major",
+            "",
+        ]
+
+        for value in safe:
+            with self.subTest(value=value):
+                self.assertFalse(breaks_fql_string_literal(value))
+
+    def test_breaks_fql_string_literal_coerces_non_strings(self):
+        """Non-string input is coerced rather than raising."""
+        self.assertFalse(breaks_fql_string_literal(123456))
 
 
 if __name__ == "__main__":

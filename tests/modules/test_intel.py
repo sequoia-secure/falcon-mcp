@@ -559,6 +559,44 @@ class TestIntelModule(TestModules):
         self.assertIn("Actor not found", result[0]["error"])
         self.assertIn("NONEXISTENT ACTOR", result[0]["message"])
 
+    def test_get_mitre_report_rejects_fql_injection_in_actor_name(self):
+        """An actor name that would break out of the FQL literal is rejected.
+
+        The payload below would otherwise produce name:'zzz',name:!'zzz' — a
+        match-anything filter whose first hit silently becomes the reported actor.
+        """
+        payloads = [
+            "zzz',name:!'zzz",
+            "WARP PANDA',target_countries:'US",
+            "WARP\\PANDA",
+            'WARP"PANDA',
+            "  zzz',name:!'zzz  ",
+        ]
+
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                self.mock_client.command.reset_mock()
+
+                result = self.module.get_mitre_report(actor=payload, format="json")
+
+                # No API call is made at all, so no injected filter can reach Falcon
+                self.mock_client.command.assert_not_called()
+
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["error"], "Invalid actor name")
+
+    def test_get_mitre_report_actor_name_is_stripped_in_filter(self):
+        """Surrounding whitespace is trimmed before the name reaches the filter."""
+        self.mock_client.command.return_value = {
+            "status_code": 200,
+            "body": {"resources": []},
+        }
+
+        self.module.get_mitre_report(actor="  FAKE BEAR  ", format="json")
+
+        call_args = self.mock_client.command.call_args
+        self.assertEqual(call_args[1]["parameters"]["filter"], "name:'FAKE BEAR'")
+
     def test_get_mitre_report_actor_search_error(self):
         """Test getting MITRE report when actor search returns an error."""
         # Setup mock response for actor search error

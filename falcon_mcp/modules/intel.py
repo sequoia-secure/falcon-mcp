@@ -12,6 +12,7 @@ from mcp.server.fastmcp.resources import TextResource
 from pydantic import AnyUrl, Field
 
 from falcon_mcp.common.logging import get_logger
+from falcon_mcp.common.utils import breaks_fql_string_literal
 from falcon_mcp.modules.base import BaseModule
 from falcon_mcp.resources.intel import (
     QUERY_ACTOR_ENTITIES_FQL_DOCUMENTATION,
@@ -329,13 +330,29 @@ class IntelModule(BaseModule):
 
         # If it's not a numeric ID, search for the actor first
         if not actor_id.isdigit():
-            logger.debug("Searching for actor: %s", actor)
+            # The name is interpolated into an FQL string literal below and FQL has
+            # no escape sequence for string values, so a name carrying a quote,
+            # backslash, or control character is rejected. Otherwise it could close
+            # the literal and inject query grammar (e.g. "x',name:!'x" matches
+            # everything), silently resolving a different actor than the one asked
+            # for.
+            if breaks_fql_string_literal(actor_id):
+                return [{
+                    "error": "Invalid actor name",
+                    "message": (
+                        "Actor name must not contain quote, backslash, or control "
+                        "characters. Use falcon_search_actors to look up the actor, "
+                        "then pass its numeric ID."
+                    ),
+                }]
+
+            logger.debug("Searching for actor: %s", actor_id)
 
             # Search for actors using the provided name with FQL filter
             search_results = self._base_search_api_call(
                 operation="QueryIntelActorEntities",
                 search_params={
-                    "filter": f"name:'{actor}'",
+                    "filter": f"name:'{actor_id}'",
                     "limit": 1,
                 },
                 error_message="Failed to search for actor by name",
