@@ -64,14 +64,15 @@ class TestCorrelationRulesModule(TestModules):
         )
 
     def test_update_tool_annotations(self):
-        """Test that update tool has non-read-only, non-destructive, idempotent annotations."""
+        """Test that update tool is annotated destructive, since it can disable a rule or
+        replace its detection logic, and non-idempotent, since each call publishes a new version."""
         self.module.register_tools(self.mock_server)
         self.assert_tool_annotations(
             "falcon_update_correlation_rule",
             ToolAnnotations(
                 readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=True,
+                destructiveHint=True,
+                idempotentHint=False,
                 openWorldHint=True,
             ),
         )
