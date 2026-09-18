@@ -37,15 +37,15 @@ class CorrelationRulesModule(BaseModule):
             ),
         )
 
+        # Destructive: the update is not additive. `status='inactive'` disables a live
+        # detection rule and `search_filter` replaces its CQL detection logic outright,
+        # both auto-published immediately — the same loss of detection coverage that
+        # deleting the rule causes. Not idempotent either: every call publishes a new
+        # rule version.
         self._add_tool(
             server=server,
             method=self.update_correlation_rule,
             name="update_correlation_rule",
-            # Destructive: the update is not additive. `status='inactive'` disables a live
-            # detection rule and `search_filter` replaces its CQL detection logic outright,
-            # both auto-published immediately — the same loss of detection coverage that
-            # deleting the rule causes. Not idempotent either: every call publishes a new
-            # rule version.
             annotations=ToolAnnotations(
                 readOnlyHint=False,
                 destructiveHint=True,
