@@ -41,10 +41,15 @@ class CorrelationRulesModule(BaseModule):
             server=server,
             method=self.update_correlation_rule,
             name="update_correlation_rule",
+            # Destructive: the update is not additive. `status='inactive'` disables a live
+            # detection rule and `search_filter` replaces its CQL detection logic outright,
+            # both auto-published immediately — the same loss of detection coverage that
+            # deleting the rule causes. Not idempotent either: every call publishes a new
+            # rule version.
             annotations=ToolAnnotations(
                 readOnlyHint=False,
-                destructiveHint=False,
-                idempotentHint=True,
+                destructiveHint=True,
+                idempotentHint=False,
                 openWorldHint=True,
             ),
         )
@@ -283,6 +288,11 @@ class CorrelationRulesModule(BaseModule):
         Modifies fields on the rule and auto-publishes a new version — no separate publish
         step needed. To enable/disable a rule, set status to 'active' or 'inactive'.
         Only provided fields are changed; omitted fields retain current values.
+
+        Destructive: this overwrites live detection configuration. Setting status to
+        'inactive' stops the rule from detecting, and search_filter replaces the rule's
+        detection logic entirely — either can silently remove detection coverage. Confirm
+        the change with a human before calling with status or search_filter.
         """
         body: dict[str, Any] = {"id": rule_id}
 
