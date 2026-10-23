@@ -3,11 +3,13 @@ Tests for the NGSIEM module.
 """
 
 import asyncio
+import inspect
 import os
 import unittest
 from unittest.mock import AsyncMock, patch
+from urllib.parse import quote
 
-from falcon_mcp.modules.ngsiem import NGSIEMModule
+from falcon_mcp.modules.ngsiem import NGSIEMModule, _validate_repository
 from tests.modules.utils.test_modules import TestModules
 
 
@@ -650,14 +652,21 @@ class TestNGSIEMModule(TestModules):
 
     @patch("falcon_mcp.modules.ngsiem.asyncio.sleep", new_callable=AsyncMock)
     def test_repository_that_would_alter_the_request_path_is_rejected(self, mock_sleep):
-        """`repository` reaches a URL path variable, so it must not carry path syntax.
+        """`repository` reaches a URL path variable, so it must not carry URL syntax.
 
-        FalconPy interpolates path variables into the route, and `requests` then
-        normalizes the path before sending it. An unencoded separator or dot-segment
-        therefore retargets the request: `a/../../oauth2/token` builds
-        `/humio/api/v1/repositories/a/../../oauth2/token/queryjobs`, which normalizes
-        to `/humio/api/v1/oauth2/token/queryjobs` — a different route than
-        StartSearchV1 selected. Reject before any call rather than relying on the SDK.
+        FalconPy interpolates path variables into the route without encoding them, and
+        `requests` then parses and normalizes the result. Any unencoded separator or
+        delimiter therefore retargets the request:
+
+        - `a/../../oauth2/token` builds
+          `/humio/api/v1/repositories/a/../../oauth2/token/queryjobs`, which normalizes
+          to `/humio/api/v1/oauth2/token/queryjobs`;
+        - `search-all?a=b` ends the path at the `?`, so the POST lands on
+          `/humio/api/v1/repositories/search-all` with attacker-chosen query params;
+        - `search-all#` starts a fragment, dropping the `/queryjobs` suffix entirely.
+
+        Each is a different route than the operation selected, reached with the
+        server's own token. Reject before any call rather than relying on the SDK.
 
         The client is wired to succeed, so without the guard this reports a clean
         search result and the assertions fail on that, not on a mock error.
@@ -666,9 +675,28 @@ class TestNGSIEMModule(TestModules):
             "a/../../oauth2/token",
             "search-all/queryjobs",
             "..",
+            ".",
             "../search-all",
             "search\\all",
             "search%2Fall",
+            # Delimiters that end the path without needing a separator.
+            "search-all?limit=1",
+            "search-all#",
+            "search-all#/queryjobs",
+            "search-all;a=b",
+            "search-all@example.com",
+            "search-all:9999",
+            # Whitespace and control characters, which `requests` would encode or
+            # reject rather than treat as part of the name.
+            "search all",
+            " search-all",
+            "search-all\n",
+            "search-all\r\nX-Injected: 1",
+            "\t",
+            # A dot run anywhere, not just as a whole segment.
+            "search..all",
+            # Empty, which would collapse the path segment away.
+            "",
         ):
             with self.subTest(repository=repository):
                 self.mock_client.command.reset_mock()
@@ -730,6 +758,10 @@ class TestNGSIEMModule(TestModules):
             "third-party",
             "falcon_for_it_view",
             "forensics_view",
+            # Custom views the field says may be passed by name.
+            "acme_custom_view",
+            "repo-2025.01",
+            "_internal",
         ):
             with self.subTest(repository=repository):
                 self.mock_client.command.reset_mock()
@@ -748,6 +780,103 @@ class TestNGSIEMModule(TestModules):
 
                 self.assertNotIn("error", result)
                 self.assertEqual(self.mock_client.command.call_count, 2)
+                for call in self.mock_client.command.call_args_list:
+                    self.assertEqual(call[1]["repository"], repository)
+
+    def test_every_accepted_repository_is_one_literal_path_segment(self):
+        """Whatever the guard accepts must survive URL quoting unchanged.
+
+        The value is interpolated into `/humio/api/v1/repositories/{}/queryjobs` with no
+        encoding, so the property that matters is not which names pass but that a name
+        that passes cannot mean anything other than itself in a path. `quote(value,
+        safe="")` percent-encodes every character that is reserved in a URL, so a value
+        it leaves alone carries no separator, delimiter, escape or whitespace.
+        """
+        accepted = (
+            "search-all",
+            "investigate_view",
+            "xdr",
+            "third-party",
+            "falcon_for_it_view",
+            "forensics_view",
+            "acme_custom_view",
+            "repo-2025.01",
+            "_internal",
+        )
+
+        for repository in accepted:
+            with self.subTest(repository=repository):
+                _, error = _validate_repository(repository)
+                self.assertIsNone(error)
+                self.assertEqual(quote(repository, safe=""), repository)
+
+    def test_unresolved_field_default_falls_back_to_the_documented_default(self):
+        """Calling the method directly leaves `repository` as a Pydantic `FieldInfo`.
+
+        FastMCP resolves defaults before dispatch, so this only happens on a direct
+        call, but the object must not reach the request path: FalconPy would format its
+        repr in, and that repr embeds the field description — slashes included. Take the
+        field's declared default and validate that instead.
+        """
+        repository, error = _validate_repository(
+            inspect.signature(NGSIEMModule.search_ngsiem).parameters["repository"].default
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(repository, "search-all")
+
+    def test_a_non_str_repository_is_rejected_rather_than_defaulted(self):
+        """Only a `FieldInfo` is a default to resolve; anything else is a caller error.
+
+        FastMCP never reaches this — Pydantic rejects a non-str for a `str` field, and
+        decodes `bytes` before dispatch — so this guards a direct Python caller. Quietly
+        substituting the default there would search a repository the caller did not ask
+        for and report success, which is worse than an error.
+        """
+        for bogus in (123, None, True, 1.5, ["search-all"], {"a": "b"}, b"search-all"):
+            with self.subTest(value=bogus):
+                repository, error = _validate_repository(bogus)
+
+                self.assertIsNotNone(error)
+                self.assertIn("repository", error["error"])
+                self.assertIsInstance(repository, str)
+
+    def test_an_oversized_repository_is_rejected_without_echoing_all_of_it(self):
+        """The rejection message goes into the model's context and the server log.
+
+        Quoting the offending value back is what makes the error actionable, but an
+        unbounded value would put a megabyte in both places, so cap the name and
+        truncate what is quoted.
+        """
+        huge = "a" * 1_000_000
+        repository, error = _validate_repository(huge)
+
+        self.assertIsNotNone(error)
+        self.assertNotIn(huge, error["error"])
+        self.assertLess(len(error["error"]), 500)
+        self.assertIn("truncated", error["error"])
+        self.assertEqual(repository, huge)
+
+        # The bound itself: at the limit is fine, one over is not.
+        self.assertIsNone(_validate_repository("a" * 255)[1])
+        self.assertIsNotNone(_validate_repository("a" * 256)[1])
+
+    @patch("falcon_mcp.modules.ngsiem.asyncio.sleep", new_callable=AsyncMock)
+    def test_omitted_repository_reaches_the_api_as_the_default_name(self, mock_sleep):
+        """The fallback above must be what the three calls actually route on."""
+        self.mock_client.command.side_effect = [
+            {"status_code": 200, "body": {"id": "job-ok"}},
+            {"status_code": 200, "body": {"done": True, "events": []}},
+        ]
+
+        result = asyncio.run(
+            self.module.search_ngsiem(query_string="aid=abc123", start="2025-01-01T00:00:00Z")
+        )
+
+        self.assertNotIn("error", result)
+        for call in self.mock_client.command.call_args_list:
+            self.assertEqual(call[1]["repository"], "search-all")
+        self.assertEqual(result["job"]["repository"], "search-all")
 
 
 class TestNGSIEMModuleConfig(unittest.TestCase):
