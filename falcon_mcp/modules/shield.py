@@ -7,7 +7,9 @@ from mcp.server.fastmcp.resources import TextResource
 from mcp.types import ToolAnnotations
 from pydantic import AnyUrl, Field
 
+from falcon_mcp.common.errors import _format_error_response
 from falcon_mcp.common.logging import get_logger
+from falcon_mcp.common.utils import unwrap_field_default
 from falcon_mcp.modules.base import BaseModule
 from falcon_mcp.resources.shield import SHIELD_QUERY_DOCUMENTATION
 
@@ -880,10 +882,13 @@ class ShieldModule(BaseModule):
                 " This is written to the audit log and visible to other administrators."
             ),
         ),
-        entities: str | None = Field(
+        entities: list[str] | None = Field(
             default=None,
             description=(
-                "Comma-separated entity names to dismiss."
+                "List of entity names to dismiss, one entity name per list item."
+                " Copy each name verbatim from `get_shield_check_affected_entities`; names are sent"
+                " to the API exactly as given and are never split on commas or any other delimiter,"
+                " so an entity name that itself contains a comma must stay a single list item."
                 " If omitted, dismisses the entire check for all entities."
                 " If provided, only the specified entities are dismissed and the check remains active for others."
             ),
@@ -895,15 +900,45 @@ class ShieldModule(BaseModule):
         the entire check for all entities, or provide specific entity names to dismiss only those.
         This action is permanent and cannot be undone from the API — the dismissal reason is recorded
         in audit logs."""
-        if isinstance(entities, str):
+        # Resolve unset Pydantic Field defaults to avoid leaking FieldInfo objects (issue #384)
+        entities = unwrap_field_default(entities)
+
+        # Entity names come from the monitored SaaS environment and may contain any
+        # character, so they are only ever accepted as discrete list items and are sent
+        # on unmodified. Dismissing the whole check is the wider, irreversible action, so
+        # only an explicitly absent `entities` selects it: anything else that is not a
+        # list of entity names is an error, never a silent dismissal of every entity.
+        body: dict[str, Any]
+        if entities is None:
+            operation = "DismissSecurityCheckV3"
+            body = {"reason": reason}
+        elif isinstance(entities, list) and entities:
+            if not all(isinstance(entity, str) and entity for entity in entities):
+                return _format_error_response(
+                    "Failed to dismiss Shield check: every item in 'entities' must be a non-empty"
+                    " entity name string. Entity names are used verbatim and are never split on"
+                    " commas, so pass each one exactly as returned by"
+                    " `get_shield_check_affected_entities`."
+                )
             operation = "DismissAffectedEntityV3"
             body = {
                 "reason": reason,
-                "entities": [e.strip() for e in entities.split(",")],
+                "entities": list(entities),
             }
+        elif isinstance(entities, list):
+            return _format_error_response(
+                "Failed to dismiss Shield check: 'entities' was provided but empty, so there is"
+                " nothing to dismiss. Use `get_shield_check_affected_entities` to look up the"
+                " names of the entities to dismiss. Dismissing the whole check for every entity"
+                " is a wider action that must be requested deliberately."
+            )
         else:
-            operation = "DismissSecurityCheckV3"
-            body = {"reason": reason}
+            return _format_error_response(
+                "Failed to dismiss Shield check: 'entities' must be a list of entity name strings,"
+                " with each entity name as its own item, or be omitted entirely to dismiss the"
+                " whole check. Entity names are used verbatim and are never split on commas, so"
+                " pass each one exactly as returned by `get_shield_check_affected_entities`."
+            )
 
         return self._base_query_api_call(
             operation=operation,
