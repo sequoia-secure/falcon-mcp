@@ -49,8 +49,8 @@ Returns the created rule record on success.
 
 ### `falcon_update_correlation_rule`
 
-> [!NOTE]
-> This tool modifies data.
+> [!CAUTION]
+> This tool performs destructive operations.
 
 **Required scopes:** `Correlation Rules:write`
 
@@ -59,6 +59,11 @@ Update an existing NG-SIEM Correlation Rule.
 Modifies fields on the rule and auto-publishes a new version — no separate publish
 step needed. To enable/disable a rule, set status to 'active' or 'inactive'.
 Only provided fields are changed; omitted fields retain current values.
+
+Destructive: this overwrites live detection configuration. Setting status to
+'inactive' stops the rule from detecting, and search_filter replaces the rule's
+detection logic entirely — either can silently remove detection coverage. Confirm
+the change with a human before calling with status or search_filter.
 
 **Example prompts:**
 
