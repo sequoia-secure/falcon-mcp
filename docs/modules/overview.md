@@ -30,6 +30,7 @@ The Falcon MCP Server provides the following modules. Each module requires speci
 | [Quarantine](/falcon-mcp/modules/quarantine/) | `Quarantined Files:read`, `Quarantined Files:write` | Investigating quarantined files and applying quarantine actions during triage and remediation workflows |
 | [Recon](/falcon-mcp/modules/recon/) | `Monitoring rules (Falcon Intelligence Recon):read` | Searching Falcon Intelligence Recon notifications, monitoring rules, and exposed-data records |
 | [Real Time Response](/falcon-mcp/modules/rtr/) | `Real time response:read`, `real-time-response-audit:read`, `Real time response:write` | Initiating and inspecting RTR sessions and for executing read-only RTR commands during host investigations |
+| [RTR file collection](/falcon-mcp/modules/rtrcollect/) | `Real time response:read`, `Real time response:write` | Pulls one file off one host with the RTR Active Responder ``get`` command and returns only its metadata |
 | [Scheduled Reports](/falcon-mcp/modules/scheduled-reports/) | `Scheduled Reports:read` | Accessing and managing CrowdStrike Falcon scheduled reports and scheduled searches |
 | [Sensor Usage](/falcon-mcp/modules/sensor-usage/) | `Sensor Usage:read` | Accessing CrowdStrike Falcon sensor usage data |
 | [Serverless](/falcon-mcp/modules/serverless/) | `Falcon Container Image:read` | Accessing and managing CrowdStrike Falcon Serverless Vulnerabilities |

@@ -114,6 +114,8 @@ API_SCOPE_REQUIREMENTS = {
     "RTR_PulseSession": ["Real time response:read"],
     "RTR_CheckCommandStatus": ["Real time response:read"],
     "RTR_ExecuteCommand": ["Real time response:read"],
+    "RTR_ExecuteActiveResponderCommand": ["Real time response:write"],
+    "RTR_CheckActiveResponderCommandStatus": ["Real time response:write"],
     "RTR_ListFilesV2": ["Real time response:write"],
     "RTRAuditSessions": ["real-time-response-audit:read"],
     "RTR_AggregateSessions": ["Real time response:read"],

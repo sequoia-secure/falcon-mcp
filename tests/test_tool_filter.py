@@ -312,13 +312,13 @@ class TestCLIDefaultsReachTheServer(unittest.TestCase):
         )
 
     def test_no_flags_still_means_all_modules(self):
-        """The default must stay 'everything' when no restriction is requested."""
+        """The default stays 'every module except the opt-in ones' when nothing is requested."""
         args = self._args([])
         mock = MagicMock()
         mock.return_value.authenticate.return_value = True
         with patch("falcon_mcp.server.FalconClient", mock):
             server = FalconMCPServer(enabled_modules=set(args.modules))
-        self.assertEqual(server.enabled_modules, set(registry.get_module_names()))
+        self.assertEqual(server.enabled_modules, set(registry.get_default_module_names()))
 
     def test_main_forwards_every_filter_flag_to_the_server(self):
         """main() must hand each parsed filter flag to the constructor.

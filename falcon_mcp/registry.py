@@ -21,6 +21,12 @@ logger = get_logger(__name__)
 # This will be populated by the discovery process
 AVAILABLE_MODULES: dict[str, type[BaseModule]] = {}
 
+# Modules left out of the default "all modules" set. Each is loaded only when a
+# deployment names it explicitly (--modules / FALCON_MCP_MODULES, or a --tools
+# allow-list entry), because it carries a capability that must not arrive on
+# every server that just runs with the defaults.
+OPT_IN_MODULES: frozenset[str] = frozenset({"rtrcollect"})
+
 
 def _register_from_module(import_path: str, log_context: str) -> None:
     """Import a module and register any *Module classes found in it."""
@@ -77,6 +83,11 @@ def get_module_names() -> list[str]:
         List of module names
     """
     return list(get_available_modules().keys())
+
+
+def get_default_module_names() -> list[str]:
+    """Get the modules enabled when none are named: every module except opt-in ones."""
+    return [name for name in get_module_names() if name not in OPT_IN_MODULES]
 
 
 def get_tool_module_map() -> dict[str, str]:
