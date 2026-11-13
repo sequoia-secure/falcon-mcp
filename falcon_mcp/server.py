@@ -124,7 +124,7 @@ class FalconMCPServer:
             # --tools alone supplies the whole surface, so start from no modules.
             self.enabled_modules = set()
         else:
-            self.enabled_modules = set(registry.get_module_names())
+            self.enabled_modules = set(registry.get_default_module_names())
 
         allow_list_modules = {
             tool_module_map[name] for name in allowed_tools if name in tool_module_map

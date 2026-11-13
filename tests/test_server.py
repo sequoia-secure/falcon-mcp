@@ -59,7 +59,7 @@ class TestFalconMCPServer(unittest.TestCase):
         )
 
         # Verify modules initialization
-        available_module_names = registry.get_module_names()
+        available_module_names = registry.get_default_module_names()
         self.assertEqual(len(server.modules), len(available_module_names))
         for module_name in available_module_names:
             self.assertIn(module_name, server.modules)
@@ -172,9 +172,10 @@ class TestFalconMCPServer(unittest.TestCase):
         result = server.list_enabled_modules()
 
         # Get the actual module names from the registry
-        expected_modules = registry.get_module_names()
+        expected_modules = registry.get_default_module_names()
 
-        # Verify result matches registry (since all modules are enabled by default)
+        # Every module except the opt-in ones is enabled by default
+        self.assertNotIn("rtrcollect", result["modules"])
         self.assertEqual(set(result["modules"]), set(expected_modules))
 
     @patch("falcon_mcp.server.FalconClient")
