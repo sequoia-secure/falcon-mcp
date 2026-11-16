@@ -7,7 +7,7 @@
 This module provides a unified set of tools for managing CrowdStrike host-based policies across all six policy types — prevention, sensor_update, firewall, device_control, response, and content_update — behind a single `policy_type` discriminator
 
 > [!NOTE]
-> CrowdStrike's hosted Falcon MCP does not use these unified, `policy_type`-discriminated tools. It instead exposes six policy-type-specific variants of each tool below, suffixed by type (`_prevention`, `_sensor_update`, `_firewall`, `_device_control`, `_response`, `_content_update`) with no `policy_type` parameter — for example `falcon_search_policies` here corresponds to `falcon_search_policies_firewall`, `falcon_search_policies_prevention`, etc. on the hosted MCP. See [module overview](/falcon-mcp/modules/overview/#crowdstrike-hosted-mcp-differences).
+> CrowdStrike MCP does not use these unified, `policy_type`-discriminated tools. It instead exposes six policy-type-specific variants of each tool below, suffixed by type (`_prevention`, `_sensor_update`, `_firewall`, `_device_control`, `_response`, `_content_update`) with no `policy_type` parameter. For example, `falcon_search_policies` here corresponds to `falcon_search_policies_firewall`, `falcon_search_policies_prevention`, etc. on CrowdStrike MCP. See [module overview](/falcon-mcp/modules/overview/#differences-from-crowdstrike-mcp).
 
 ## API Scopes
 
@@ -89,8 +89,8 @@ policies are created disabled. Returns the created policy record.
 
 ### `falcon_update_policy`
 
-> [!NOTE]
-> This tool modifies data.
+> [!CAUTION]
+> This tool performs destructive operations.
 
 **Required scopes:** `Content Update Policies:write`, `Device Control Policies:write`, `Firewall Management:write`, `Prevention Policies:write`, `Response Policies:write`, `Sensor Update Policies:write`
 
@@ -129,8 +129,8 @@ the API response for the deletion.
 
 ### `falcon_perform_policy_action`
 
-> [!NOTE]
-> This tool modifies data.
+> [!CAUTION]
+> This tool performs destructive operations.
 
 **Required scopes:** `Content Update Policies:write`, `Device Control Policies:write`, `Firewall Management:write`, `Prevention Policies:write`, `Response Policies:write`, `Sensor Update Policies:write`
 
@@ -150,8 +150,8 @@ records.
 
 ### `falcon_set_policy_precedence`
 
-> [!NOTE]
-> This tool modifies data.
+> [!CAUTION]
+> This tool performs destructive operations.
 
 **Required scopes:** `Content Update Policies:write`, `Device Control Policies:write`, `Firewall Management:write`, `Prevention Policies:write`, `Response Policies:write`, `Sensor Update Policies:write`
 
