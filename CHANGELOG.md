@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.20.2](https://github.com/CrowdStrike/falcon-mcp/compare/v0.20.1...v0.20.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* **deps:** keep Dependabot on mcp 1.x ([#594](https://github.com/CrowdStrike/falcon-mcp/issues/594)) ([3c367ec](https://github.com/CrowdStrike/falcon-mcp/commit/3c367ec1a0e565f2a9cf7d166e956d6c17ae7b12))
+* **modules/cloud:** clarify what cloud risks aggregate ([#572](https://github.com/CrowdStrike/falcon-mcp/issues/572)) ([b7da8e9](https://github.com/CrowdStrike/falcon-mcp/commit/b7da8e9037cae5b92b8538545a7c7b7fa075c7b1))
+* **tests:** allow timestamp ties in recon rules sort-order test ([#582](https://github.com/CrowdStrike/falcon-mcp/issues/582)) ([7400585](https://github.com/CrowdStrike/falcon-mcp/commit/74005850160a5633a770de78e40dce9a51e5ba7a))
+* **tests:** skip Guardian product assertions when Unclassified ([#583](https://github.com/CrowdStrike/falcon-mcp/issues/583)) ([e89d50b](https://github.com/CrowdStrike/falcon-mcp/commit/e89d50bd444514ce52ae6ae12c10e40d844ace04))
+
+## [0.20.1](https://github.com/CrowdStrike/falcon-mcp/compare/v0.20.0...v0.20.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **docs:** announce maintenance mode and point users to CrowdStrike MCP ([#591](https://github.com/CrowdStrike/falcon-mcp/issues/591)) ([285602f](https://github.com/CrowdStrike/falcon-mcp/commit/285602f76dbef07b1c26067cb366722a126445bf))
+
+## [0.20.0](https://github.com/CrowdStrike/falcon-mcp/compare/v0.19.0...v0.20.0) (2026-10-22)
+
+
+### Features
+
+* **modules/data-security:** expand data-protection module's tools. ([#576](https://github.com/CrowdStrike/falcon-mcp/issues/576)) ([ece8575](https://github.com/CrowdStrike/falcon-mcp/commit/ece85750f8c9445850c61315f8cdbdf21dbf2b4f))
+
+
+### Bug Fixes
+
+* correct destructiveHint on mutating tools and pin mcp-publisher ([#577](https://github.com/CrowdStrike/falcon-mcp/issues/577)) ([82d5031](https://github.com/CrowdStrike/falcon-mcp/commit/82d5031dddca464bb81d74bfec31fcc51a0d5854))
+* **deps:** raise certifi floor and refresh Docker base images ([#587](https://github.com/CrowdStrike/falcon-mcp/issues/587)) ([ea8c946](https://github.com/CrowdStrike/falcon-mcp/commit/ea8c9465e480725695f14079f377668aa1ba4ded))
+* **dynamic:** live-validate the residual FQL filter-hint findings ([#574](https://github.com/CrowdStrike/falcon-mcp/issues/574)) ([9bc0efe](https://github.com/CrowdStrike/falcon-mcp/commit/9bc0efeb92e38ca0667e5a18847a7cbf09dcd206))
+
 ## [0.19.0](https://github.com/CrowdStrike/falcon-mcp/compare/v0.18.0...v0.19.0) (2026-09-01)
 
 
